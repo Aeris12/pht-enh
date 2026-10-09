@@ -1,7 +1,5 @@
-import base64
-import os
 import logging
-from io import BytesIO
+import os
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, Response
@@ -12,6 +10,7 @@ app = FastAPI(title="Photo Enhancer")
 
 MODEL = os.getenv("GEMINI_MODEL", "gemini-3-pro-image")
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "12"))
+API_KEY_ENV = "GEMINI_API_KEY"
 
 PROMPT = """
 Enhance the uploaded photograph while faithfully preserving the original image.
@@ -41,31 +40,46 @@ main{max-width:850px;margin:0 auto;padding:48px 20px}h1{font-size:clamp(32px,6vw
 </section><p class="small">Prototyp testowy. Wyniki generatywnej AI mogą zmieniać drobne szczegóły. Nie przesyłaj poufnych zdjęć.</p>
 </main><script>
 const file=document.getElementById('file'),go=document.getElementById('go'),status=document.getElementById('status'),images=document.getElementById('images'),droptext=document.getElementById('droptext');let selected;
-file.addEventListener('change',()=>{selected=file.files[0];images.innerHTML='';status.textContent='';go.disabled=!selected;if(selected){droptext.textContent=selected.name;const url=URL.createObjectURL(selected);images.innerHTML='<div><div class="label">ORYGINAŁ</div><img src="'+url+'" alt="Oryginał"></div>'}});
-go.addEventListener('click',async()=>{if(!selected)return;go.disabled=true;go.textContent='Przetwarzanie…';status.textContent='Wysyłanie zdjęcia do modelu AI…';try{const fd=new FormData();fd.append('file',selected);const r=await fetch('/api/enhance',{method:'POST',body:fd});if(!r.ok){let t=await r.text();throw new Error(t||'Błąd API');}const blob=await r.blob(),url=URL.createObjectURL(blob);const box=document.createElement('div');box.innerHTML='<div class="label">WYNIK</div>';const img=document.createElement('img');img.src=url;img.alt='Ulepszone zdjęcie';box.appendChild(img);const a=document.createElement('a');a.href=url;a.download='enhanced-photo.png';a.className='btn';a.style.display='block';a.style.textAlign='center';a.style.textDecoration='none';a.textContent='Pobierz wynik';box.appendChild(a);images.appendChild(box);status.textContent='Gotowe.';}catch(e){status.textContent='Nie udało się przetworzyć zdjęcia. '+e.message;}finally{go.disabled=!selected;go.textContent='Enhance'}});
+file.addEventListener('change',()=>{selected=file.files[0];images.innerHTML='';status.textContent='';go.disabled=!selected;if(selected){droptext.textContent=selected.name;const url=URL.createObjectURL(selected);const box=document.createElement('div');box.innerHTML='<div class="label">ORYGINAŁ</div>';const img=document.createElement('img');img.src=url;img.alt='Oryginał';box.appendChild(img);images.appendChild(box)}});
+go.addEventListener('click',async()=>{if(!selected)return;go.disabled=true;go.textContent='Przetwarzanie…';status.textContent='Wysyłanie zdjęcia do modelu AI…';try{const fd=new FormData();fd.append('file',selected);const r=await fetch('/api/enhance',{method:'POST',body:fd});if(!r.ok){let t=await r.text();try{const j=JSON.parse(t);if(j.detail)t=j.detail}catch(_){}throw new Error(t||'Błąd API')}const blob=await r.blob(),url=URL.createObjectURL(blob);const box=document.createElement('div');box.innerHTML='<div class="label">WYNIK</div>';const img=document.createElement('img');img.src=url;img.alt='Ulepszone zdjęcie';box.appendChild(img);const a=document.createElement('a');a.href=url;a.download='enhanced-photo.png';a.className='btn';a.style.display='block';a.style.textAlign='center';a.style.textDecoration='none';a.textContent='Pobierz wynik';box.appendChild(a);images.appendChild(box);status.textContent='Gotowe.'}catch(e){status.textContent='Nie udało się przetworzyć zdjęcia. '+e.message}finally{go.disabled=!selected;go.textContent='Enhance'}});
 </script></body></html>"""
 
 @app.get("/", response_class=HTMLResponse)
 def home():
     return PAGE
 
+
 @app.get("/health")
 def health():
-    return {"ok": True, "model": MODEL, "api_key_configured": bool(os.getenv("GEMINI_API_KEY"))}
+    return {
+        "ok": True,
+        "model": MODEL,
+        "api_key_configured": bool(os.getenv(API_KEY_ENV)),
+    }
+
 
 @app.post("/api/enhance")
 async def enhance(file: UploadFile = File(...)):
-    api_key = os.getenv("GEMINI_API_KEY")
+    api_key = os.getenv(API_KEY_ENV)
     if not api_key:
-        raise HTTPException(status_code=503, detail="API nie jest jeszcze skonfigurowane. Dodaj GEMINI_API_KEY w ustawieniach Render.")
+        raise HTTPException(
+            status_code=503,
+            detail="API nie jest jeszcze skonfigurowane. Dodaj GEMINI_API_KEY w ustawieniach Render.",
+        )
+
     content_type = file.content_type or ""
     if content_type not in {"image/jpeg", "image/png", "image/webp"}:
         raise HTTPException(status_code=415, detail="Dozwolone formaty: JPG, PNG, WebP.")
+
     data = await file.read()
     if not data:
         raise HTTPException(status_code=400, detail="Plik jest pusty.")
     if len(data) > MAX_UPLOAD_MB * 1024 * 1024:
-        raise HTTPException(status_code=413, detail=f"Plik jest większy niż {MAX_UPLOAD_MB} MB.")
+        raise HTTPException(
+            status_code=413,
+            detail=f"Plik jest większy niż {MAX_UPLOAD_MB} MB.",
+        )
+
     try:
         client = genai.Client(api_key=api_key)
         response = client.models.generate_content(
@@ -75,28 +89,41 @@ async def enhance(file: UploadFile = File(...)):
                 types.Part.from_bytes(data=data, mime_type=content_type),
             ],
             config=types.GenerateContentConfig(
-    response_modalities=["IMAGE"],
-    image_config=types.ImageConfig(image_size="4K"),
-),
+                response_modalities=["IMAGE"],
+                image_config=types.ImageConfig(image_size="4K"),
+            ),
         )
+
         for part in response.parts:
-            if getattr(part, "inline_data", None) and part.inline_data.data:
-                mime = part.inline_data.mime_type or "image/png"
-                return Response(content=part.inline_data.data, media_type=mime,
-                                headers={"Content-Disposition": 'inline; filename="enhanced-photo.png"'})
-        raise HTTPException(status_code=502, detail="Model nie zwrócił obrazu. Sprawdź dostępność modelu i limity API.")
+            inline_data = getattr(part, "inline_data", None)
+            if inline_data and inline_data.data:
+                mime = inline_data.mime_type or "image/png"
+                extension = "webp" if mime == "image/webp" else "jpg" if mime == "image/jpeg" else "png"
+                return Response(
+                    content=inline_data.data,
+                    media_type=mime,
+                    headers={"Content-Disposition": f'inline; filename="enhanced-photo.{extension}"'},
+                )
+
+        raise HTTPException(
+            status_code=502,
+            detail="Model nie zwrócił obrazu. Sprawdź dostępność modelu i limity API.",
+        )
+
     except HTTPException:
         raise
     except Exception as exc:
-        # Return a useful provider error without exposing credentials.
-        message = str(exc).replace(api_key, "[UKRYTY KLUCZ API]") if api_key else str(exc)
-        message = " ".join(message.split())[:700]
         logging.exception(
-    "Gemini request failed (model=%s, exception=%s)",
-    MODEL,
-    type(exc).__name__,
-)
+            "Gemini request failed (model=%s, exception=%s)",
+            MODEL,
+            type(exc).__name__,
+        )
+        message = str(exc).replace(api_key, "[UKRYTY KLUCZ API]")
+        message = " ".join(message.split())[:700]
         raise HTTPException(
             status_code=502,
-            detail=f"Dostawca AI zwrócił błąd ({type(exc).__name__}). Model: {MODEL}. Szczegóły: {message or 'brak szczegółów'}",
+            detail=(
+                f"Dostawca AI zwrócił błąd ({type(exc).__name__}). "
+                f"Model: {MODEL}. Szczegóły: {message or 'brak szczegółów'}"
+            ),
         ) from exc
