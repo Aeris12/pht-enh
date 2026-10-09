@@ -1,5 +1,6 @@
 import base64
 import os
+import logging
 from io import BytesIO
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -9,7 +10,7 @@ from google.genai import types
 
 app = FastAPI(title="Photo Enhancer")
 
-MODEL = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-image")
+MODEL = os.getenv("GEMINI_MODEL", "gemini-3-pro-image")
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "12"))
 
 PROMPT = """
@@ -73,7 +74,10 @@ async def enhance(file: UploadFile = File(...)):
                 PROMPT,
                 types.Part.from_bytes(data=data, mime_type=content_type),
             ],
-            config=types.GenerateContentConfig(response_modalities=["IMAGE", "TEXT"]),
+            config=types.GenerateContentConfig(
+    response_modalities=["IMAGE"],
+    image_config=types.ImageConfig(image_size="4K"),
+),
         )
         for part in response.parts:
             if getattr(part, "inline_data", None) and part.inline_data.data:
@@ -87,7 +91,11 @@ async def enhance(file: UploadFile = File(...)):
         # Return a useful provider error without exposing credentials.
         message = str(exc).replace(api_key, "[UKRYTY KLUCZ API]") if api_key else str(exc)
         message = " ".join(message.split())[:700]
-        app.logger.exception("Gemini request failed (model=%s, exception=%s)", MODEL, type(exc).__name__)
+        logging.exception(
+    "Gemini request failed (model=%s, exception=%s)",
+    MODEL,
+    type(exc).__name__,
+)
         raise HTTPException(
             status_code=502,
             detail=f"Dostawca AI zwrócił błąd ({type(exc).__name__}). Model: {MODEL}. Szczegóły: {message or 'brak szczegółów'}",
