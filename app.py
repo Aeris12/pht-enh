@@ -9,7 +9,7 @@ from google.genai import types
 
 app = FastAPI(title="Photo Enhancer")
 
-MODEL = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-image-preview")
+MODEL = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-image")
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "12"))
 
 PROMPT = """
@@ -84,5 +84,11 @@ async def enhance(file: UploadFile = File(...)):
     except HTTPException:
         raise
     except Exception as exc:
-        # Don't leak API key or raw provider request details to browser.
-        raise HTTPException(status_code=502, detail=f"Błąd dostawcy AI: {type(exc).__name__}. Sprawdź model, klucz i limity API.") from exc
+        # Return a useful provider error without exposing credentials.
+        message = str(exc).replace(api_key, "[UKRYTY KLUCZ API]") if api_key else str(exc)
+        message = " ".join(message.split())[:700]
+        app.logger.exception("Gemini request failed (model=%s, exception=%s)", MODEL, type(exc).__name__)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Dostawca AI zwrócił błąd ({type(exc).__name__}). Model: {MODEL}. Szczegóły: {message or 'brak szczegółów'}",
+        ) from exc
